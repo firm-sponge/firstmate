@@ -899,6 +899,33 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
+test_local_only_registered_landing() {
+  local case_dir mode rc main_head
+  for mode in landed unlanded missing; do
+    case_dir=$(make_case "landing-$mode")
+    write_meta "$case_dir" local-only ship
+    printf '%s\n' '- project [local-only land=dom/main] - T29' > "$case_dir/data/projects.md"
+    main_head=$(git -C "$case_dir/project" rev-parse main)
+    git -C "$case_dir/project" branch dom/main
+    wt_commit "$case_dir" 'T29 landing work'
+    case "$mode" in
+      landed) git -C "$case_dir/project" update-ref refs/heads/dom/main "$(git -C "$case_dir/wt" rev-parse HEAD)" ;;
+      unlanded) git -C "$case_dir/project" update-ref refs/heads/main "$(git -C "$case_dir/wt" rev-parse HEAD)" ;;
+      missing) git -C "$case_dir/project" branch -D dom/main >/dev/null ;;
+    esac
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/out" 2>&1 || rc=$?
+    if [ "$mode" = landed ]; then
+      expect_code 0 "$rc" 'T29: work landed on dom/main should teardown without force'
+      [ "$(git -C "$case_dir/project" rev-parse main)" = "$main_head" ] || fail 'teardown changed main'
+    else
+      [ "$rc" -ne 0 ] || fail "T29: $mode work was discarded"
+      [ -e "$case_dir/state/task-x1.meta" ] || fail 'refusal removed task metadata'
+    fi
+  done
+  pass 'T29: teardown uses dom/main and refuses missing or unlanded work'
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -6198,6 +6225,7 @@ test_teardown_closes_a_gitlab_task_with_its_merge_request_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_local_only_registered_landing
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_no_mistakes_mirror_only_branch_refuses

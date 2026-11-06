@@ -19,7 +19,9 @@
 # The optional fifth argument is the task's base branch from bin/fm-brief.sh
 # --base-branch; empty means the repository default. A named base is the branch
 # the worker starts from, never pushes to, and targets with its pull request, and
-# fm_base_branch_valid refuses it where no pull request carries the work.
+# local-only starts from its local ref; fm_base_branch_valid refuses unsupported forges.
+# The optional eighth argument names the local-only landing branch in the done
+# contract; empty means the local default branch.
 # The optional seventh argument is the task's PR-text posture, auto|manual,
 # defaulting to auto: `manual` is bin/fm-brief.sh --pr manual, the registry's
 # `pr=manual` token (bin/fm-project-mode.sh owns what the binding means). It
@@ -242,17 +244,13 @@ fm_ship_branch_prefix() {  # <branch> <task-id>
 # bin/fm-spawn.sh takes it as --base-branch, refuses a brief whose Base branch
 # lines (fm_brief_base_branches) disagree, and records base_branch= in the task
 # metadata, and every later consumer reads that metadata field. It is
-# refused on local-only, whose landing fast-forwards local main, and on a Gerrit
+# accepted on local-only as a local starting point, and refused on a Gerrit
 # forge, whose publish path targets the change's own branch.
 fm_base_branch_valid() {  # <base> <mode> <forge> <caller>
   local base=$1 mode=$2 forge=$3 caller=$4
   [ -n "$base" ] || return 0
   if [ "${base#-}" != "$base" ] || ! git check-ref-format --branch "$base" >/dev/null 2>&1; then
     echo "error: $caller: base branch '$base' is not a valid git branch name" >&2
-    return 1
-  fi
-  if [ "$mode" = local-only ]; then
-    echo "error: $caller: a base branch cannot ship mode=local-only, whose landing fast-forwards local main; ship no-mistakes or direct-PR, which open a pull request against the base" >&2
     return 1
   fi
   if [ "$forge" != none ]; then
@@ -535,8 +533,8 @@ If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the 
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<pr>]
-  local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-} pr=${7:-auto}
+fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [<base>] [<consent>] [<pr>] [<landing>]
+  local mode=$1 id=$2 forge=${4:-none} base=${5:-} consent=${6:-} pr=${7:-auto} landing=${8:-}
   local branch=${3:-fm/$id} pr_base='' nm_base='' base_q contract_forge='' contract_consent='' forge_cli=gh-axi draft_check adapter
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
   fm_base_branch_valid "$base" "$mode" "$forge" fm_dod_block || return 1
@@ -662,9 +660,9 @@ Ship branch: $branch
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`$branch\`. Do NOT push, do NOT open a PR, do NOT merge.
 A \`done:\` is accepted when the named head is on this project's shared local branch, not only on a detached copy; the check tests that head, not merely that a branch moved.
-Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
+Keep your branch a clean fast-forward onto ${landing:-the current default branch} so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done [at=<epoch>]: ready in branch $branch\` to the status file and stop.
-The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
+The configured merge authority approves the ready branch, then firstmate merges it into ${landing:-the local default branch} through the guarded fast-forward path.
 EOF
       ;;
     no-mistakes:*)

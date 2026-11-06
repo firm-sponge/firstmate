@@ -1062,7 +1062,7 @@ Without it, every fresh ship or scout worktree on a project with an origin remot
 
 With it present, a fresh local-only ship, or a scout spawned without `--base-branch`, starts from the primary checkout's `<default>` when that branch strictly contains origin's tip.
 A local-only project lands work there through `bin/fm-merge-local.sh` and never pushes, so `origin/<default>` stays at the last push, and a fresh task would otherwise start behind work already landed and load the project's instruction files from that stale tree.
-A no-mistakes or direct-PR ship and any task with a named base branch still start from origin's tip, because that work is delivered against origin.
+A no-mistakes or direct-PR ship and a scout with a named base branch still start from origin's tip, because that work is delivered against origin.
 When the primary checkout's `<default>` and origin's have diverged, the spawn prints a note and starts from origin's tip.
 A project without an origin remote is unaffected, and a relaunch never changes the base a task already has.
 
@@ -2259,6 +2259,15 @@ It uses the same live secondmate discovery and propagation helper as bootstrap; 
 - The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md#charter-and-seed) owns the local and remote re-read behavior shared with locked bootstrap inheritance, including unchanged retries and interrupted transfers.
 - That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 - Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
+
+## Local landing branch (data/projects.md land= token)
+
+Register `[local-only land=dom/main]` to land local work on an existing local `dom/main` instead of the project's default branch.
+`bin/fm-project-mode.sh` owns the token grammar and query contract, including invalid-mode and missing-branch refusals.
+`bin/fm-merge-local.sh` fast-forwards that branch to the pinned done head, and teardown checks whether it contains the work.
+Ship briefs and spawns use it as their base unless `--base-branch` explicitly selects another starting branch; that override does not change the landing destination.
+A named local-only base starts from its local ref without fetching origin, independently of `config/spawn-base-primary-checkout`.
+Entries without `land=` keep their existing behavior, and local-only projects remain unsupported in secondmates.
 
 ## Forge selection (data/projects.md forge= token)
 

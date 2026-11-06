@@ -50,13 +50,15 @@
 #   prints a one-line deviation notice and continues, because the registered
 #   prefix is the captain's standing preference and the brief agreement above
 #   already guarantees the worker's instructions match the branch.
+#   Local-only ships resolve land= as --base-branch when no explicit base is
+#   passed, and a named local-only base uses its local ref without fetching.
 #   --base-branch is the optional branch selected at intake for a ship or scout
 #   to start from and target instead of origin's default branch. A fresh launch
 #   resets its pooled copy to origin/<branch>, refusing when the project has no
 #   origin or origin lacks that branch, or when the project's registered forge
 #   cannot carry it. It must agree with every Setup "Base branch:" line in the
 #   brief (bin/fm-brief.sh --base-branch writes one; other such lines are prose),
-#   and a brief with such a line refuses a spawn without the flag. The spawn records it as
+#   and a brief with such a line requires the same explicit or registry-resolved base. The spawn records it as
 #   base_branch= in state/<id>.meta, which a relaunch reuses and later review and
 #   cleanup read; it is refused on secondmates and relaunches, and without it
 #   nothing changes.
@@ -359,7 +361,7 @@
 #   branch in the primary checkout when it strictly contains origin's tip: a
 #   local-only project lands work there through bin/fm-merge-local.sh and never
 #   pushes, so origin stays frozen at the last push. A publishing mode
-#   (bin/fm-dod-lib.sh fm_mode_publishes) and a named base branch keep origin's
+#   (bin/fm-dod-lib.sh fm_mode_publishes) and a named scout base keep origin's
 #   tip, because that work is delivered against origin. Two branches that have
 #   diverged also keep origin's tip, with a note counting both sides. The
 #   primary's commit is read from the local object store, so nothing more is
@@ -4257,6 +4259,13 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       fi
     fi
   fi
+  if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ] && [ "$MODE" = local-only ]; then
+    LAND_BRANCH=$("$FM_ROOT/bin/fm-project-mode.sh" --raw --land-branch "$(basename "$PROJ_ABS")" "$PROJ_ABS") || exit 1
+    if [ -n "$LAND_BRANCH" ]; then
+      LAND_BRANCH=$("$FM_ROOT/bin/fm-project-mode.sh" --land-branch "$(basename "$PROJ_ABS")" "$PROJ_ABS") || exit 1
+      if [ "$BASE_BRANCH_SET" -eq 0 ]; then BASE_BRANCH=$LAND_BRANCH; BASE_BRANCH_SET=1; fi
+    fi
+  fi
   if [ "$RELAUNCH" -eq 1 ]; then
     BASE_BRANCH=$(fm_meta_get "$RELAUNCH_META" base_branch)
   elif [ "$BASE_BRANCH_SET" -eq 1 ]; then
@@ -4686,6 +4695,14 @@ freshen_spawn_worktree_base() { # <worktree> <base-branch> <project> <mode>; 2 w
       echo "error: pooled worktree '$worktree' is not clean; refusing to discard uncommitted work while refreshing its base" >&2
     fi
     return 2
+  fi
+  if [ "$mode" = local-only ] && [ -n "$base" ]; then
+    expected=$(git -C "$project" rev-parse --verify --quiet "refs/heads/$base^{commit}") || {
+      echo "error: local base branch '$base' does not exist in $project" >&2
+      return 1
+    }
+    git -C "$worktree" reset --hard "$expected" >/dev/null || return 1
+    return 0
   fi
   if ! spawn_worktree_has_origin_config "$worktree"; then
     [ -z "$base" ] || {

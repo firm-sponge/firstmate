@@ -6,7 +6,8 @@
 # the default branch, and projects with no origin remote against the local
 # default branch.
 # A task whose meta records base_branch= (bin/fm-spawn.sh) compares against
-# origin/<base_branch> instead of the default branch.
+# origin/<base_branch> instead of the default branch, or the local branch for
+# a local-only task.
 # A home that creates config/spawn-base-primary-checkout, where bin/fm-spawn.sh
 # can start a local-only ship or a scout from the primary checkout's <default>,
 # instead anchors a remote-backed task without base_branch= on the branch it
@@ -214,7 +215,10 @@ resolve_review_base() {
   printf '%s' "$DEFAULT"
 }
 
-if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
+MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ "$MODE" = local-only ] && [ -n "$RECORDED_BASE" ]; then
+  BASE="refs/heads/$RECORDED_BASE"
+elif git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
   git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
