@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Perform the approved local merge for a local-only ship task: fast-forward the
-# project's default branch to local_done_head= in state/<task-id>.meta,
+# project's landing branch to local_done_head= in state/<task-id>.meta,
 # recorded when the done report was accepted by bin/fm-dod-lib.sh. Missing or
 # malformed heads refuse. Legacy tasks with no head must report readiness again
 # before approval. The recorded ship branch must still point at that exact commit.
@@ -104,22 +104,6 @@ PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ "$MODE" = local-only ] || { echo "error: task $ID is mode=$MODE, not local-only; merge PR tasks with bin/fm-pr-merge.sh <id> <PR url> after approval" >&2; exit 1; }
 
-default_branch() {
-  local ref branch
-  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
-    return 0
-  fi
-  for branch in main master; do
-    if git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
-      echo "$branch"
-      return 0
-    fi
-  done
-  return 1
-}
-
 BRANCH=$(grep '^branch=' "$META" | cut -d= -f2- || true)
 [ -n "$BRANCH" ] || BRANCH="fm/$ID"
 if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
@@ -137,19 +121,20 @@ MERGE_PROJECT_LOCK="$project_git_dir/fm-local-landing.lock"
 fm_lock_acquire_wait "$MERGE_PROJECT_LOCK"
 local_head_matches || { echo "error: branch $BRANCH differs from the recorded local done head; refusing" >&2; exit 1; }
 
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+DEFAULT=$("$SCRIPT_DIR/fm-project-mode.sh" --land-branch "$(basename "$PROJ")" "$PROJ") || exit 1
 
-# The project's main checkout must be on its default branch and clean, so the
+# The project's main checkout must be on its landing branch and clean, so the
 # fast-forward lands predictably (firstmate never writes here otherwise).
-cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
-[ "$cur" = "$DEFAULT" ] || { echo "error: $PROJ is on '$cur', expected default branch '$DEFAULT'; cannot merge safely" >&2; exit 1; }
+cur=$(git -C "$PROJ" symbolic-ref HEAD 2>/dev/null || echo "")
+cur=${cur#refs/heads/}
+[ "$cur" = "$DEFAULT" ] || { echo "error: $PROJ is on '$cur', expected landing branch '$DEFAULT'; cannot merge safely" >&2; exit 1; }
 if [ -n "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ]; then
   echo "error: $PROJ has a dirty working tree; refusing to merge into it" >&2
   exit 1
 fi
 
 # Clean fast-forward only: DEFAULT must be an ancestor of BRANCH.
-before=$(git -C "$PROJ" rev-parse "$DEFAULT")
+before=$(git -C "$PROJ" rev-parse "refs/heads/$DEFAULT")
 if ! git -C "$PROJ" merge-base --is-ancestor "$before" "$MERGE_HEAD"; then
   echo "REFUSED: $BRANCH is not a fast-forward of $DEFAULT (it has diverged)." >&2
   echo "Have the crewmate rebase $BRANCH onto $DEFAULT, then retry." >&2
@@ -171,7 +156,7 @@ case "$hold_status" in
     ;;
 esac
 # Recheck after the approval read. Git's ref transaction below verifies and
-# locks the worker head together with the default-branch update.
+# locks the worker head together with the landing-branch update.
 if [ "$(fm_dod_local_done_head "$META")" != "$MERGE_HEAD" ] || ! local_head_matches; then
   echo "error: local done head or branch changed during approval check; refusing" >&2
   exit 1
@@ -188,7 +173,7 @@ prepare
 commit
 EOF
 if [ "$merge_status" -ne 0 ]; then
-  # The transaction left main untouched. Undo only the staged fast-forward;
+  # The transaction left the landing branch untouched. Undo only the staged fast-forward;
   # the two-tree checkout also protects any intervening local edits here.
   git -C "$PROJ" read-tree -m -u "$MERGE_HEAD" "$before" || {
     echo "error: local merge refused and checkout restoration failed in $PROJ" >&2
@@ -200,7 +185,7 @@ MERGE_META_LOCK=
 fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
 [ "$merge_status" -eq 0 ] || exit "$merge_status"
-after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
+after=$(git -C "$PROJ" rev-parse --short "refs/heads/$DEFAULT")
 fm_lock_release "$MERGE_PROJECT_LOCK" || true
 MERGE_PROJECT_LOCK=
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.

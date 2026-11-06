@@ -59,6 +59,9 @@
 # standing per-project preference, and firstmate resolves it per task at intake
 # and passes the explicit flag. Refused on --scout and --secondmate: a scout
 # makes no branch and a charter is not a delivery contract.
+# A local-only ship with land= starts from that local branch when --base-branch
+# is absent; --project can locate its checkout outside the home projects root.
+# An explicit local-only base changes only the starting point, not land=.
 # --base-branch <branch> starts the task from origin's <branch> instead of the
 # repository default, for work that belongs on a named integration, feature, or
 # release branch. It writes a "Base branch: <branch>" line under `# Setup`, which
@@ -605,6 +608,16 @@ fi
 
 REPO=${POS[1]}
 
+LAND_BRANCH=
+if [ "$KIND" = ship ] && [ "$MODE" = local-only ]; then
+  LAND_PROJECT=${PROJECT_DIR:-${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}/$REPO}
+  LAND_BRANCH=$("$SCRIPT_DIR/fm-project-mode.sh" --raw --land-branch "$REPO" "$LAND_PROJECT") || exit 1
+  if [ -n "$LAND_BRANCH" ]; then
+    LAND_BRANCH=$("$SCRIPT_DIR/fm-project-mode.sh" --land-branch "$REPO" "$LAND_PROJECT") || exit 1
+    if [ "$BASE_BRANCH_SET" -eq 0 ]; then BASE_BRANCH=$LAND_BRANCH; BASE_BRANCH_SET=1; fi
+  fi
+fi
+
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
 # shellcheck disable=SC2016  # single quotes are deliberate: these lines are literal brief text whose backtick-wrapped $(...) and "$HERDR_LAB_SESSION" snippets must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
@@ -776,7 +789,7 @@ case "$MODE" in
     ;;
 esac
 RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
-DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT" "$PR_TEXT") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH" "$UPSTREAM_CONSENT" "$PR_TEXT" "$LAND_BRANCH") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.

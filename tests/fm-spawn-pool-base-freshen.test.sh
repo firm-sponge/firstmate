@@ -1102,8 +1102,8 @@ test_named_base_branch_starts_from_that_branch() {
   out=$(run_spawn "$id" --mode local-only --yolo off --base-branch feature/hub)
   status=$?
   [ "$status" -ne 0 ] || fail "a base branch on a local-only ship should refuse the spawn"
-  assert_contains "$out" "mode=local-only" "the local-only refusal did not explain itself"
-  pass "--base-branch picks the copy's starting point and is recorded; a missing or local-only base refuses"
+  assert_contains "$out" "local base branch" "the missing local base refusal did not explain itself"
+  pass "--base-branch picks the copy's starting point and is recorded; a missing remote or local base refuses"
 }
 
 test_base_branch_must_agree_with_the_brief() {
@@ -1377,6 +1377,48 @@ test_opt_in_still_refuses_an_unclean_slot_first() {
     || fail "the opted-in spawn moved an unclean slot's base"
   pass "with the opt-in an unclean slot is still refused, untouched, before any base is chosen"
 }
+
+# T29: use a local landing tip even when origin lacks the branch or is absent.
+test_local_landing_branch_base() {
+  local rec id origin_mode out status landing initial
+  for origin_mode in present absent explicit; do
+    id="landing-$origin_mode"
+    rec=$(make_case "$id" "$id")
+    read_case_record "$rec"
+    initial=$(git -C "$PROJECT_DIR" rev-parse main)
+    git -C "$PROJECT_DIR" checkout -q -b dom/main
+    git -C "$PROJECT_DIR" -c user.name=Tests -c user.email=tests@example.invalid commit -q --allow-empty -m 'T29 local landing'
+    landing=$(git -C "$PROJECT_DIR" rev-parse HEAD)
+    printf '%s\n' '- project [local-only land=dom/main] - T29' > "$HOME_DIR/data/projects.md"
+    if [ "$origin_mode" = absent ]; then git -C "$PROJECT_DIR" remote remove origin; fi
+    if [ "$origin_mode" = explicit ]; then
+      git -C "$PROJECT_DIR" branch topic/start main
+      brief_with_base "$id" topic/start
+      out=$(run_spawn "$id" --mode local-only --yolo off --base-branch topic/start)
+    else
+      rm "$HOME_DIR/data/$id/brief.md"
+      FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" project --project "$PROJECT_DIR" --mode local-only >/dev/null || fail 'T29 local brief failed'
+      sed -i.bak 's/{TASK}/T29 fixture intent/g; s/{FIRSTMATE_SPEC}/T29 fixture implementation/g' "$HOME_DIR/data/$id/brief.md"
+      out=$(run_spawn "$id" --mode local-only --yolo off)
+    fi
+    status=$?
+    expect_code 0 "$status" "T29 $origin_mode local landing spawn failed: $out"
+    if [ "$origin_mode" = explicit ]; then
+      [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$initial" ] || fail 'explicit local base did not win'
+      assert_grep 'base_branch=topic/start' "$HOME_DIR/state/$id.meta" 'explicit local base not recorded'
+    else
+      [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$landing" ] || fail 'spawn missed local landing tip'
+      assert_grep 'base_branch=dom/main' "$HOME_DIR/state/$id.meta" 'landing base not recorded'
+    fi
+    [ "$(git -C "$PROJECT_DIR" rev-parse main)" = "$initial" ] || fail 'T29 spawn moved main'
+    git -C "$POOL_DIR" checkout -q -b "fm/$id"
+    out=$(FM_HOME="$HOME_DIR" "$ROOT/bin/fm-review-diff.sh" "$id" --stat) || fail "T29 local review failed: $out"
+    assert_contains "$out" 'diff base: refs/heads/' 'T29 local review used a remote anchor'
+  done
+  pass 'T29: spawn uses local landing tip, supports no origin, and respects explicit base'
+}
+
+test_local_landing_branch_base
 
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome

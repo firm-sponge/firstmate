@@ -75,7 +75,7 @@
 # Dirty refusals distinguish untracked-only leftovers from tracked edits and list
 # at most ten non-exempt untracked paths. tests/fm-teardown.test.sh covers hidden
 # untracked work and the clean return control.
-# local-only projects additionally accept work merged into the local default
+# local-only projects additionally accept work merged into the local landing
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
 # Safety is proved again after task processes are reaped, before backlog-close
@@ -1802,7 +1802,7 @@ work_is_landed() {
 
 # The completion links this teardown already holds locally. A retained scout
 # keeps its report as the held deliverable, while a force-closed scout is
-# recorded as discarded with no report. A local-only ship lands on local main,
+# recorded as discarded with no report. A local-only ship lands on its local landing branch,
 # and every other ship carries the PR recorded on its own record.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
@@ -1824,7 +1824,7 @@ backlog_done_args() {
       ;;
     *)
       if [ "$MODE" = local-only ]; then
-        BACKLOG_DONE_ARGS=(--note "local main")
+        BACKLOG_DONE_ARGS=(--note "local landing branch")
       elif [ -n "$PR_URL" ]; then
         BACKLOG_DONE_ARGS=(--pr "$PR_URL")
       fi
@@ -2150,8 +2150,8 @@ validate_worktree_teardown_safety() {
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
 
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
-    DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
-    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
+    DEFAULT=$("$SCRIPT_DIR/fm-project-mode.sh" --land-branch "$(basename "$PROJ")" "$PROJ") || return 1
+    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "refs/heads/$DEFAULT" -- 2>/dev/null); then
       if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
       fi

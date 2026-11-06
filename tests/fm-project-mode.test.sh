@@ -43,7 +43,7 @@ cat > "$DATA/projects.md" <<'EOF'
 EOF
 
 run_mode() {
-  FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" "$1" 2>/dev/null
+  FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" "$@" 2>/dev/null
 }
 run_forge() {
   FM_DATA_OVERRIDE="$DATA" "$PROJECT_MODE" --forge "$1" 2>/dev/null
@@ -162,3 +162,35 @@ assert_contains "$err" "only a no-mistakes ship takes it" "the direct-PR refusal
 pass "fm-project-mode: pr=manual refuses another mode, a bound forge, an empty value, and an unknown value, but leaves --forge answerable"
 
 echo "# fm-project-mode.test.sh: all assertions passed"
+
+# T29: landing overrides compose with the existing registry tokens.
+(
+  fm_git_identity fmtest fmtest@example.invalid
+  proj="$TMP_ROOT/landing"
+  git init -q -b main "$proj"
+  git -C "$proj" commit -q --allow-empty -m initial
+  git -C "$proj" branch dom/main
+  cat >> "$DATA/projects.md" <<'EOF'
+- landing [land=dom/main local-only +yolo branch=dev/] - T29
+- missing-land [local-only land=absent] - T29
+- empty-land [local-only land=] - T29
+- invalid-land [local-only land=bad..name] - T29
+- remote-land [direct-PR land=dom/main] - T29
+- gated-land [no-mistakes land=dom/main] - T29
+- policy-land [no-mistakes-prod-only land=dom/main] - T29
+EOF
+  [ "$(run_mode landing)" = 'local-only on' ] || fail 'land= changed mode/yolo'
+  [ "$(run_mode --branch-prefix landing)" = dev/ ] || fail 'land= changed branch prefix'
+  [ "$(run_mode --land-branch landing "$proj")" = dom/main ] || fail 'landing override not resolved'
+  [ "$(run_mode --land-branch legacy "$proj")" = main ] || fail 'absent land= changed default'
+  [ -z "$(run_mode --raw --land-branch legacy)" ] || fail 'absent raw landing override not empty'
+  for name in missing-land empty-land invalid-land remote-land gated-land policy-land; do
+    rc=0
+    out=$(run_mode --land-branch "$name" "$proj" 2>"$TMP_ROOT/land.err") || rc=$?
+    [ "$rc" -eq 3 ] && [ -z "$out" ] || fail "$name did not refuse landing query"
+  done
+  for name in empty-land invalid-land remote-land gated-land policy-land; do
+    run_mode "$name" >/dev/null 2>&1 && fail "$name handed out a delivery posture"
+  done
+  pass 'T29: landing override, default, token order and invalid bindings'
+)

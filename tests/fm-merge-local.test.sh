@@ -308,7 +308,33 @@ SH
   pass 'two approved tasks with the same tree cannot roll back a successful landing'
 }
 
-fm_test_run test_two_tasks_cannot_undo_a_same_tree_landing test_branch_advance_does_not_change_approval \
+test_registered_landing_branch() {
+  local mode
+  for mode in clean dirty diverged missing wrong-checkout; do
+    make_case "landing-$mode"
+    printf '%s\n' '- project [local-only land=dom/main] - T29' > "$HOME_DIR/data/projects.md"
+    git -C "$PROJ" checkout -q -b dom/main
+    record_done || fail 'landing fixture readiness was not accepted'
+    case "$mode" in
+      clean) git -C "$PROJ" tag dom/main "$X" ;;
+      dirty) printf 'dirty\n' > "$PROJ/dirty.txt" ;;
+      diverged) git -C "$PROJ" commit -q --allow-empty -m diverged ;;
+      missing) git -C "$PROJ" checkout -q main; git -C "$PROJ" branch -D dom/main >/dev/null ;;
+      wrong-checkout) git -C "$PROJ" checkout -q main ;;
+    esac
+    if [ "$mode" = clean ]; then
+      land >/dev/null || fail 'T29 dom/main did not land'
+      [ "$(git -C "$PROJ" rev-parse refs/heads/dom/main)" = "$X" ] || fail 'landing missed approved head'
+      [ -z "$(git -C "$PROJ" status --porcelain)" ] || fail 'landing dirtied checkout'
+    else
+      land >/dev/null 2>&1 && fail "$mode landing unexpectedly succeeded"
+    fi
+    [ "$(git -C "$PROJ" rev-parse main)" = "$BASE" ] || fail 'T29 changed main'
+  done
+  pass 'T29: dom/main landing preserves main and rejects unsafe landing states'
+}
+
+fm_test_run test_registered_landing_branch test_two_tasks_cannot_undo_a_same_tree_landing test_branch_advance_does_not_change_approval \
   test_missing_and_malformed_head_refuse test_change_after_hold_check_refuses \
   test_diverged_default_refuses test_change_during_approval_check_refuses \
   test_snapshot_cannot_pin_a_replacement_task test_done_recording_preserves_caller_locks

@@ -441,7 +441,7 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   id="brief-local-authority-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj --mode local-only >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path." "$brief" \
+  assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into the local default branch through the guarded fast-forward path." "$brief" \
     "local-only brief lost configured merge authority and guarded landing"
   assert_no_grep "The captain approves the ready branch" "$brief" \
     "local-only brief hard-coded captain-only authority"
@@ -1452,13 +1452,12 @@ test_base_branch_is_rendered_and_bounded() {
     "a brief without --base-branch changed its default-branch setup line"
 
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-lo-b5 some-proj --mode local-only --base-branch feature/hub 2>&1); rc=$?
-  [ "$rc" -ne 0 ] || fail "local-only --base-branch should be refused"
-  assert_contains "$out" "mode=local-only" "the local-only refusal did not explain itself"
+  [ "$rc" -eq 0 ] || fail "local-only --base-branch should scaffold: $out"
   out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-bad-b6 some-proj --mode direct-PR --base-branch 'bad..name' 2>&1); rc=$?
   [ "$rc" -ne 0 ] || fail "an invalid base branch name should be refused"
   out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER=charter "$ROOT/bin/fm-brief.sh" brief-base-sm-b7 --secondmate --no-projects --base-branch feature/hub 2>&1); rc=$?
   [ "$rc" -ne 0 ] || fail "a secondmate charter should refuse --base-branch"
-  for id in brief-base-lo-b5 brief-base-bad-b6 brief-base-sm-b7; do
+  for id in brief-base-bad-b6 brief-base-sm-b7; do
     [ ! -e "$home/data/$id/brief.md" ] || fail "a refused --base-branch scaffold wrote $id"
   done
   pass "fm-brief.sh: --base-branch records the base, targets the PR at it, and is refused where no PR carries it"
@@ -1732,3 +1731,24 @@ test_branch_prefix_is_refused_where_it_does_not_apply
 test_branch_prefix_value_is_validated
 test_branch_prefix_command_is_shell_safe
 test_crewmate_scaffolds_forbid_pool_administration
+
+# T29: a registry landing override supplies the base and the landing contract.
+(
+  home="$TMP_ROOT/landing-home"
+  mkdir -p "$home/data" "$home/projects"
+  fm_git_identity fmtest fmtest@example.invalid
+  git init -q -b main "$home/projects/local-proj"
+  git -C "$home/projects/local-proj" commit -q --allow-empty -m initial
+  git -C "$home/projects/local-proj" branch dom/main
+  printf '%s\n' '- local-proj [local-only land=dom/main] - T29' > "$home/data/projects.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" landing-brief local-proj --mode local-only >/dev/null || fail 'T29 brief failed'
+  brief="$home/data/landing-brief/brief.md"
+  assert_grep 'Base branch: dom/main' "$brief" 'T29 did not select landing base'
+  assert_grep 'firstmate merges it into dom/main through' "$brief" 'T29 did not name landing branch'
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" landing-explicit local-proj --mode local-only --base-branch topic/start >/dev/null || fail 'explicit local base failed'
+  assert_grep 'Base branch: topic/start' "$home/data/landing-explicit/brief.md" 'explicit base did not win'
+  assert_grep 'firstmate merges it into dom/main through' "$home/data/landing-explicit/brief.md" 'explicit starting base changed landing destination'
+  git -C "$home/projects/local-proj" branch -D dom/main >/dev/null
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" landing-missing local-proj --mode local-only >/dev/null 2>&1 && fail 'missing landing branch produced a brief'
+  pass 'T29: brief resolves landing branch, preserves explicit base, refuses missing landing'
+)
