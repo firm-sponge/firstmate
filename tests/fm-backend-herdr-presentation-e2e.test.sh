@@ -114,6 +114,7 @@ arg_value() {
 }
 
 label=$(arg_value --label "$@" || true)
+[ "${1:-} ${2:-}" != "tab rename" ] || label=${4:-}
 if [ "${1:-} ${2:-}" = "workspace list" ] && [ -d "$ACTIVE_SEEDED_CONTROL" ]; then
   stage=$(cat "$ACTIVE_SEEDED_CONTROL/stage" 2>/dev/null || true)
   if [ "$stage" = task-created ]; then
@@ -133,6 +134,7 @@ mutation_target=${3:-}
 case "${1:-} ${2:-}" in
   "workspace create") mutation=workspace-create; mutation_target=$label ;;
   "tab create") mutation=tab-create; mutation_target=$label ;;
+  "tab rename") mutation=tab-rename; mutation_target=$label ;;
   "pane close") mutation=pane-close ;;
   "tab focus") mutation=tab-focus ;;
 esac
@@ -185,19 +187,15 @@ if [ "$status" -eq 0 ] && [ "$mutation" = workspace-create ]; then
       task=${label#$'└ '}; task=${task%% *}
       mkdir -p "$POST_CREATE_ABORT_CONTROL/$task"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id')" > "$POST_CREATE_ABORT_CONTROL/$task/workspace"
+      printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$POST_CREATE_ABORT_CONTROL/$task/task-pane"
       ;;
   esac
 fi
-if [ "$status" -eq 0 ] && [ "$mutation" = tab-create ]; then
+if [ "$status" -eq 0 ] && [ "$mutation" = tab-rename ]; then
   case "$label" in
     fm-active-seeded)
-      printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$ACTIVE_SEEDED_CONTROL/task-pane"
+      printf '%s\n' "$(cat "$ACTIVE_SEEDED_CONTROL/seeded-pane")" > "$ACTIVE_SEEDED_CONTROL/task-pane"
       printf '%s\n' task-created > "$ACTIVE_SEEDED_CONTROL/stage"
-      ;;
-    fm-abort-a|fm-abort-b)
-      task=${label#fm-}
-      mkdir -p "$POST_CREATE_ABORT_CONTROL/$task"
-      printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$POST_CREATE_ABORT_CONTROL/$task/task-pane"
       ;;
   esac
 fi
@@ -716,36 +714,36 @@ printf '%s' "$PROJECTED_PANES" | jq -e --arg pane "$PROJECTED_PANE" \
 SECOND_TWO_INFO=$(lab workspace get "$SECOND_TWO_WSID") || fail "focused secondmate disappeared during projected create"
 [ "$(printf '%s' "$SECOND_TWO_INFO" | jq -r '.result.workspace.focused')" = true ] \
   || fail "projected create or workspace.move stole focus from the captain's current space"
-pass "real Herdr lab: every projected create, task-tab create, seeded prune, and move preserves active workspace and tab"
+pass "real Herdr lab: every projected create, task-tab rename, and move preserves active workspace and tab"
 
 mkdir -p "$ACTIVE_SEEDED_CONTROL"
 printf '%s\n' requested > "$ACTIVE_SEEDED_CONTROL/stage"
 ACTIVE_SEEDED_START=$(log_line_count)
 cp "$MOVE_CALL_LOG" "$TMP_ROOT/move-log-before-active-seeded"
 if ! spawn_task active-seeded "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/active-seeded.out" 2> "$TMP_ROOT/active-seeded.err"; then
-  fail "detached persisted-focus seeded prune should succeed: $(cat "$TMP_ROOT/active-seeded.err")"
+  fail "detached persisted-focus seed reuse should succeed: $(cat "$TMP_ROOT/active-seeded.err")"
 fi
 if grep -F "target is the captain's active tab" "$TMP_ROOT/active-seeded.err" >/dev/null 2>&1; then
-  fail "detached persisted-focus seeded prune still used the live-viewer refusal"
+  fail "detached persisted-focus seed reuse still used the live-viewer refusal"
 fi
 ACTIVE_SEEDED_PANE=$(cat "$ACTIVE_SEEDED_CONTROL/seeded-pane")
 ACTIVE_SEEDED_TASK_PANE=$(cat "$ACTIVE_SEEDED_CONTROL/task-pane")
-if lab pane get "$ACTIVE_SEEDED_PANE" >/dev/null 2>&1; then
-  fail "detached persisted-focus seeded prune left the seeded pane behind"
-fi
+[ "$ACTIVE_SEEDED_PANE" = "$ACTIVE_SEEDED_TASK_PANE" ] \
+  || fail "fresh projection did not reuse the exact seed pane"
 lab pane get "$ACTIVE_SEEDED_TASK_PANE" >/dev/null 2>&1 \
-  || fail "detached persisted-focus seeded prune lost the task pane"
-sed -n "$((ACTIVE_SEEDED_START + 1)),\$p" "$HERDR_CALL_LOG" | grep -F $'pane\tclose\t'"$ACTIVE_SEEDED_PANE" >/dev/null 2>&1 \
-  || fail "detached persisted-focus seeded prune did not close the seeded pane"
+  || fail "seed reuse lost the task pane"
+if sed -n "$((ACTIVE_SEEDED_START + 1)),\$p" "$HERDR_CALL_LOG" | grep -F $'pane\tclose\t' >/dev/null 2>&1; then
+  fail "fresh seed reuse closed a pane"
+fi
 lab tab focus "$SECOND_TWO_TAB" >/dev/null || fail "could not restore the captured captain tab after the active seeded-tab fixture"
 assert_focus_is "$CAPTAIN_FOCUS" "active seeded-tab fixture restoration"
 rm -rf "$ACTIVE_SEEDED_CONTROL"
 remember_meta_worktree "$HOME_DIR/state/active-seeded.meta" >/dev/null
 teardown_task active-seeded "$HOME_DIR" > "$TMP_ROOT/active-seeded-teardown.out" 2> "$TMP_ROOT/active-seeded-teardown.err" \
-  || fail "detached persisted-focus seeded prune leftover teardown failed: $(cat "$TMP_ROOT/active-seeded-teardown.err")"
+  || fail "detached persisted-focus seed reuse leftover teardown failed: $(cat "$TMP_ROOT/active-seeded-teardown.err")"
 cp "$TMP_ROOT/move-log-before-active-seeded" "$MOVE_CALL_LOG"
 assert_focus_is "$CAPTAIN_FOCUS" "active seeded-tab fixture cleanup"
-pass "real Herdr lab: persisted-focused seeded prune proceeds when no live client is attached"
+pass "real Herdr lab: persisted-focused seed reuse proceeds when no live client is attached"
 
 LOCK_CONTENTION_READY="$TMP_ROOT/lock-contention-ready"
 LOCK_CONTENTION_RELEASE="$TMP_ROOT/lock-contention-release"
@@ -879,8 +877,8 @@ FAIL_LIST=$(lab workspace list) || fail "could not inspect the move-failure fall
 lab pane get "$ORDER_FAIL_PANE" >/dev/null 2>&1 \
   || fail "workspace.move failure cleaned up the safely-created task pane"
 FAIL_CLOSED_PANES=$(sed -n "$((FAIL_START + 1)),\$p" "$HERDR_CALL_LOG" | awk -F '\t' '$1 == "pane" && $2 == "close" { print $3 }')
-[ "$(printf '%s\n' "$FAIL_CLOSED_PANES" | awk 'NF { n += 1 } END { print n + 0 }')" = 1 ] \
-  || fail "move-failure spawn performed a pane close beyond the normal seeded-pane prune"
+[ "$(printf '%s\n' "$FAIL_CLOSED_PANES" | awk 'NF { n += 1 } END { print n + 0 }')" = 0 ] \
+  || fail "move-failure spawn closed a pane despite fresh seed reuse"
 [ "$FAIL_CLOSED_PANES" != "$ORDER_FAIL_PANE" ] \
   || fail "move-failure spawn closed its exact task pane"
 assert_no_ordering_lifecycle_calls_since "$FAIL_START" "failed presentation ordering"

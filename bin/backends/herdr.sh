@@ -2672,11 +2672,12 @@ EOF
 #   FM_BACKEND_HERDR_PROJECTION_TAB_ID
 #   FM_BACKEND_HERDR_PROJECTION_PANE_ID
 #   FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE
-# CLEANUP_SAFE becomes 1 only after both creates returned complete exact IDs.
+# The fresh seed becomes the task tab; no second tab or seed prune is needed.
+# CLEANUP_SAFE becomes 1 only after create and rename confirm exact identities.
 # A missing, failed, or malformed create response stays ambiguous and grants no
 # cleanup authority.
 fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-label>
-  local cwd=$1 workspace_label=$2 task_label=$3 session out tabs panes tab_count pane_count focus_before active_tab
+  local cwd=$1 workspace_label=$2 task_label=$3 session out tabs panes focus_before phase agent_out
   FM_BACKEND_HERDR_PROJECTION_SESSION=""
   FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID=""
   FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID=""
@@ -2708,83 +2709,56 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
   FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID=$(printf '%s' "$out" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)
   FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
   FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
-  if [ -z "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" ] \
-     || [ -z "$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID" ] \
-     || [ -z "$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID" ]; then
-    echo "error: herdr presentation workspace create returned incomplete IDs; leaving its journal quarantined" >&2
+  if ! printf '%s' "$out" | jq -se '
+    length == 1 and (.[0].result | [.workspace.workspace_id, .tab.tab_id, .root_pane.pane_id]
+      | all(.[]; type == "string" and test("^[^[:space:]]+$")))' >/dev/null 2>&1; then
+    echo "error: herdr presentation workspace create returned incomplete or ambiguous IDs; leaving its journal quarantined" >&2
     return 1
   fi
+  FM_BACKEND_HERDR_PROJECTION_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
+  FM_BACKEND_HERDR_PROJECTION_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
 
-  focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
-    echo "error: herdr presentation task-tab create could not capture exact active workspace and tab; refusing a focus-unsafe projection" >&2
-    return 1
-  }
-  if out=$(fm_backend_herdr_cli "$session" tab create \
-    --workspace "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" \
-    --cwd "$cwd" --label "$task_label" --no-focus 2>/dev/null); then
-    :
-  else
-    fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "task-tab create" || true
-    echo "error: herdr presentation task-tab create failed ambiguously; leaving its journal quarantined" >&2
-    return 1
-  fi
-  fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "task-tab create" || {
-    echo "error: herdr presentation task-tab create did not preserve exact active focus; leaving its journal quarantined" >&2
-    return 1
-  }
-  FM_BACKEND_HERDR_PROJECTION_TAB_ID=$(printf '%s' "$out" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)
-  FM_BACKEND_HERDR_PROJECTION_PANE_ID=$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)
-  if [ -z "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" ] || [ -z "$FM_BACKEND_HERDR_PROJECTION_PANE_ID" ]; then
-    echo "error: herdr presentation task-tab create returned incomplete IDs; leaving its journal quarantined" >&2
-    return 1
-  fi
-  # shellcheck disable=SC2034  # caller consumes the same-process cleanup gate
-  FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=1
-  focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
-    echo "error: herdr presentation seeded-tab prune could not capture exact active workspace and tab; refusing a focus-unsafe prune" >&2
-    return 1
-  }
-  if ! fm_backend_herdr_workspace_prune_seeded_default_tab \
-    "$session" \
-    "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" \
-    "$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID" \
-    focus-preserving; then
-    echo "error: herdr presentation seeded-tab prune refused a focus-unsafe close; leaving its journal quarantined" >&2
-    return 1
-  fi
-  active_tab=${focus_before#*$'\t'}
-  if [ "$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID" != "$active_tab" ]; then
-    fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "seeded-tab prune" || {
-      echo "error: herdr presentation seeded-tab prune did not preserve exact active focus; leaving its journal quarantined" >&2
+  # Check both sides of rename: labels are mutable, exact membership is not.
+  for phase in before after; do
+    tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" 2>/dev/null) || return 1
+    panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" 2>/dev/null) || return 1
+    if ! printf '%s' "$tabs" | jq -se --arg tab "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" \
+      --arg ws "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" \
+      'length == 1 and (.[0].result.tabs | type == "array" and length == 1 and
+        .[0].tab_id == $tab and .[0].workspace_id == $ws)' >/dev/null 2>&1 \
+      || ! printf '%s' "$panes" | jq -se --arg pane "$FM_BACKEND_HERDR_PROJECTION_PANE_ID" \
+        --arg tab "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" --arg ws "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" \
+        'length == 1 and (.[0].result.panes | type == "array" and length == 1 and
+          .[0].pane_id == $pane and .[0].tab_id == $tab and .[0].workspace_id == $ws)' >/dev/null 2>&1; then
+      echo "error: disposable herdr presentation workspace did not converge to exactly one task pane" >&2
       return 1
-    }
-  fi
-
-  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" 2>/dev/null) || {
-    echo "error: could not verify the disposable herdr presentation workspace shape" >&2
-    return 1
-  }
-  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" 2>/dev/null) || {
-    echo "error: could not verify the disposable herdr presentation pane shape" >&2
-    return 1
-  }
-  if ! printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 \
-     || ! printf '%s' "$panes" | jq -e '(.result.panes | type) == "array"' >/dev/null 2>&1; then
-    echo "error: could not parse the disposable herdr presentation workspace shape" >&2
-    return 1
-  fi
-  tab_count=$(printf '%s' "$tabs" | jq -r '.result.tabs | length' 2>/dev/null)
-  pane_count=$(printf '%s' "$panes" | jq -r '.result.panes | length' 2>/dev/null)
-  if [ "$tab_count" != 1 ] || [ "$pane_count" != 1 ] \
-     || ! printf '%s' "$tabs" | jq -e --arg task "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" \
-       --arg seeded "$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID" \
-       '.result.tabs[0].tab_id == $task and ([.result.tabs[] | select(.tab_id == $seeded)] | length) == 0' >/dev/null 2>&1 \
-     || ! printf '%s' "$panes" | jq -e --arg pane "$FM_BACKEND_HERDR_PROJECTION_PANE_ID" \
-       --arg tab "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" \
-       '.result.panes[0].pane_id == $pane and .result.panes[0].tab_id == $tab' >/dev/null 2>&1; then
-    echo "error: disposable herdr presentation workspace did not converge to exactly one task pane" >&2
-    return 1
-  fi
+    fi
+    # A registered or unreadable agent is never a fresh shell to reuse.
+    agent_out=$(fm_backend_herdr_cli "$session" agent get "$FM_BACKEND_HERDR_PROJECTION_PANE_ID" 2>&1) || true
+    if ! printf '%s' "$agent_out" | jq -se 'length == 1 and .[0].error.code == "agent_not_found"' >/dev/null 2>&1; then
+      echo "error: herdr presentation seed has a registered or unknown agent; refusing reuse" >&2
+      return 1
+    fi
+    [ "$phase" = before ] || continue
+    fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" || return 1
+    focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 1
+    if out=$(fm_backend_herdr_cli "$session" tab rename "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" "$task_label" 2>/dev/null); then
+      :
+    else
+      fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "task-tab rename" || true
+      echo "error: herdr presentation task-tab rename failed ambiguously; leaving its journal quarantined" >&2
+      return 1
+    fi
+    fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "task-tab rename" || return 1
+    if ! printf '%s' "$out" | jq -se --arg tab "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" \
+      --arg ws "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" --arg want "$task_label" \
+      'length == 1 and (.[0].result.tab | .tab_id == $tab and .workspace_id == $ws and .label == $want)' >/dev/null 2>&1; then
+      echo "error: herdr presentation task-tab rename returned ambiguous identity; leaving its journal quarantined" >&2
+      return 1
+    fi
+    # shellcheck disable=SC2034  # caller consumes the same-process cleanup gate
+    FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=1
+  done
   return 0
 }
 
