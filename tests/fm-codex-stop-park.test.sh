@@ -194,8 +194,10 @@ test_unconfigured_home_keeps_the_foreground_checkpoint() {
 }
 
 test_version_gate_selects_only_the_verified_cli() {
-  local home out version
-  for version in 0.163.0 0.164.0; do
+  local home out version expected
+  for version in 0.9.99 0.162.99 0.163.0 0.163.1 0.167.0 0.999.0 0.1000.0 1.0.0 malformed 0.163 0.163.0-beta 0.163.0.1 0..163.0; do
+    expected=0
+    case "$version" in 0.9.99|0.162.99|malformed|0.163|0.163.0-beta|0.163.0.1|0..163.0) expected=1 ;; esac
     home=$(make_home "version-$version" opted-in)
     out=$(under_codex "$home" '
       printf "%s" "{\"session_id\":\"$SESSION_ID\",\"transcript_path\":\"$FM_HOME/transcript.jsonl\"}" \
@@ -205,20 +207,20 @@ test_version_gate_selects_only_the_verified_cli() {
       "$PARK" --capable; echo "registered-capable=$?"
     ' FM_FAKE_CODEX_VERSION="$version" 2>&1)
     assert_contains "$out" "session-start=0" "session start under codex-cli $version: $out"
-    if [ "$version" = 0.163.0 ]; then
+    if [ "$expected" = 0 ]; then
       assert_equals "$SESSION_ID" "$(sed -n 1p "$home/state/.codex-park-session" 2>/dev/null)" \
         "the verified CLI's native session start must register the session"
       assert_equals "$SESSION_ID" "$(cat "$home/sessionstart-park-session")" \
         "the verified CLI's session start must select the park"
-      assert_contains "$out" "capable=0" "a registered verified session must be capable: $out"
+      assert_contains "$out" "capable=0" "a registered CLI at or above the version floor must be capable: $out"
     else
+      assert_contains "$out" "capable=1" "a rejected CLI must not be capable: $out"
+      assert_contains "$out" "registered-capable=1" "a rejected CLI must not be capable even when registered: $out"
       assert_equals "" "$(cat "$home/sessionstart-park-session")" \
-        "an unverified CLI's session start must not select the park"
-      assert_contains "$out" "capable=1" "an unverified CLI must not be capable: $out"
-      assert_contains "$out" "registered-capable=1" "an unverified CLI must not be capable even when registered: $out"
+        "an unverified CLI must not select the park for session start"
     fi
   done
-  pass "the park is selected only for the verified codex-cli version"
+  pass "the park accepts only well-formed codex-cli versions at or above the numeric floor"
 }
 
 test_single_flight_claim_admits_one_park() {
