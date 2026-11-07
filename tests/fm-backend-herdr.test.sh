@@ -2277,78 +2277,84 @@ test_projection_journal_v2_binds_and_advances_exact_endpoint() {
 }
 
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
-  local dir state log resp fb out token journal
-  dir="$TMP_ROOT/projection-create"; state="$dir/state"; mkdir -p "$dir/responses" "$state"
-  log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '{"result":{"workspace":{"workspace_id":"w9"},"tab":{"tab_id":"w9:t1"},"root_pane":{"pane_id":"w9:p1"}}}\n' > "$resp/1.out"
-  printf '{"result":{"tab":{"tab_id":"w9:t2"},"root_pane":{"pane_id":"w9:p2"}}}\n' > "$resp/2.out"
-  printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/3.out"
-  printf '{"result":{"panes":[{"pane_id":"w9:p1","tab_id":"w9:t1"},{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/4.out"
-  printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/5.out"
-  printf '{"result":{"pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}}}\n' > "$resp/6.out"
-  # The emptying-close plan's tab list proves the seeded prune is NOT
-  # workspace-emptying (the task tab remains), so the close stays plain.
-  printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/7.out"
-  printf '{"error":{"code":"pane_not_found"}}\n' > "$resp/9.out"
-  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/10.out"
-  printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/11.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
-    bash -c '
-      . "$0/bin/backends/herdr.sh"
-      fm_backend_herdr_projection_focus_snapshot() { printf "captain-ws\tcaptain-tab"; }
-      fm_backend_herdr_projection_focus_restore() { return 0; }
-      token=$(fm_backend_herdr_projection_journal_create "$1" task-p2) || exit 1
-      label=$(fm_backend_herdr_projection_workspace_label task-p2 "$token")
-      fm_backend_herdr_projection_create_task /tmp/proj "$label" fm-task-p2 || exit 1
-      printf "%s %s %s %s %s\n" \
-        "$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID" \
-        "$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID" \
-        "$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID" \
-        "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" \
-        "$FM_BACKEND_HERDR_PROJECTION_PANE_ID"
-    ' "$ROOT" "$state") || fail "projection create should succeed from complete exact responses"
-  [ "$out" = "w9 w9:t1 w9:p1 w9:t2 w9:p2" ] || fail "projection create did not retain exact response IDs: $out"
-  journal="$state/task-p2.herdr-presentation"
-  token=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_token "$1" task-p2' "$ROOT" "$journal") \
-    || fail "projection journal was not readable"
-  assert_contains "$(cat "$log")" $'workspace\x1fcreate\x1f--cwd\x1f/tmp/proj\x1f--label\x1f└ task-p2 · p:'"$token"$'\x1f--no-focus' \
-    "projection workspace create did not use the corner label, full token, and --no-focus"
-  assert_contains "$(cat "$log")" $'tab\x1fcreate\x1f--workspace\x1fw9\x1f--cwd\x1f/tmp/proj\x1f--label\x1ffm-task-p2\x1f--no-focus' \
-    "projection task tab did not target the exact new workspace"
-  assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p1' \
-    "projection create did not prune the exact seeded root pane"
-  assert_not_contains "$(cat "$log")" $'workspace\x1fclose' \
-    "projection create must never call workspace close"
-  pass "herdr presentation create: exact response IDs yield one normal task pane with no workspace-close authority"
+  local scenario dir log resp fb out status expected cleanup slot
+  for scenario in renamed-seed renamed-task extra-tab extra-pane after-extra-tab after-extra-pane foreign-membership \
+    ambiguous-create multiple-create failed-create ambiguous-rename wrong-rename failed-rename registered-agent unknown-agent active-viewer; do
+    dir="$TMP_ROOT/projection-create-$scenario"; mkdir -p "$dir/responses"
+    log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '%s\n' '{"result":{"workspace":{"workspace_id":"w9"},"tab":{"tab_id":"w9:t1"},"root_pane":{"pane_id":"w9:p1"}}}' > "$resp/1.out"
+    printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t1","label":"automatically renamed seed","workspace_id":"w9"}]}}' > "$resp/2.out"
+    printf '%s\n' '{"result":{"panes":[{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}]}}' > "$resp/3.out"
+    printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/4.out"
+    printf '%s\n' '{"result":{"tab":{"tab_id":"w9:t1","workspace_id":"w9","label":"fm-task-p2"}}}' > "$resp/5.out"
+    cp "$resp/2.out" "$resp/6.out"
+    cp "$resp/3.out" "$resp/7.out"
+    cp "$resp/4.out" "$resp/8.out"
+    expected=1; cleanup=0
+    case "$scenario" in
+      renamed-seed|renamed-task) expected=0; cleanup=1 ;;
+      extra-tab|after-extra-tab)
+        slot=2; [ "$scenario" = extra-tab ] || { slot=6; cleanup=1; }
+        jq '.result.tabs += [{tab_id:"w9:t2",label:"fm-task-p2",workspace_id:"w9"}]' "$resp/$slot.out" > "$dir/extra"
+        mv "$dir/extra" "$resp/$slot.out" ;;
+      extra-pane|after-extra-pane)
+        slot=3; [ "$scenario" = extra-pane ] || { slot=7; cleanup=1; }
+        jq '.result.panes += [{pane_id:"w9:p2",tab_id:"w9:t1",workspace_id:"w9"}]' "$resp/$slot.out" > "$dir/extra"
+        mv "$dir/extra" "$resp/$slot.out" ;;
+      foreign-membership) sed 's/"workspace_id":"w9"/"workspace_id":"foreign"/' "$resp/3.out" > "$dir/foreign"; mv "$dir/foreign" "$resp/3.out" ;;
+      ambiguous-create) printf '%s\n' '{"result":{"workspace":{"workspace_id":["w9","foreign"]}}}' > "$resp/1.out" ;;
+      multiple-create) cat "$resp/1.out" "$resp/1.out" > "$dir/multiple"; mv "$dir/multiple" "$resp/1.out" ;;
+      failed-create) printf '1\n' > "$resp/1.exit" ;;
+      ambiguous-rename) printf '{}\n' > "$resp/5.out" ;;
+      wrong-rename) sed 's/"w9:t1"/"foreign:t1"/' "$resp/5.out" > "$dir/wrong"; mv "$dir/wrong" "$resp/5.out" ;;
+      failed-rename) printf '1\n' > "$resp/5.exit" ;;
+      registered-agent) printf '%s\n' '{"result":{"agent":{"agent_status":"working"}}}' > "$resp/4.out" ;;
+      unknown-agent) printf '{}\n' > "$resp/4.out" ;;
+    esac
+    [ "$scenario" != renamed-task ] || printf '%s\n' '{"result":{"tabs":[{"tab_id":"w9:t1","label":"user renamed task","workspace_id":"w9"}]}}' > "$resp/6.out"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+      SCENARIO="$scenario" bash -c '
+        . "$0/bin/backends/herdr.sh"
+        fm_backend_herdr_projection_focus_snapshot() {
+          if [ "$SCENARIO" = active-viewer ]; then printf "w9\tw9:t1"; else printf "parent\tparent:t1"; fi
+        }
+        fm_backend_herdr_projection_focus_restore() { return 0; }
+        [ "$SCENARIO" != active-viewer ] || export FM_FAKE_HERDR_FOREGROUND_REASON=cleared
+        rc=0
+        fm_backend_herdr_projection_create_task /tmp/proj same-label fm-task-p2 || rc=$?
+        printf "rc=%s cleanup=%s ids=%s/%s/%s/%s\n" "$rc" "$FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE" \
+          "$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID" "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" \
+          "$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID" "$FM_BACKEND_HERDR_PROJECTION_PANE_ID"
+        exit "$rc"
+      ' "$ROOT" 2>&1)
+    status=$?
+    [ "$status" = "$expected" ] || fail "$scenario projection returned $status, expected $expected: $out"
+    assert_contains "$out" "cleanup=$cleanup" "$scenario gave ambiguous cleanup authority"
+    if [ "$expected" = 0 ]; then
+      assert_contains "$out" 'ids=w9:t1/w9:t1/w9:p1/w9:p1' "$scenario did not reuse exact seed identities"
+      assert_contains "$(cat "$log")" $'tab\x1frename\x1fw9:t1\x1ffm-task-p2' "$scenario did not rename the exact seed"
+    fi
+    assert_not_contains "$(cat "$log")" $'tab\x1fcreate' "$scenario created a second tab"
+    assert_not_contains "$(cat "$log")" $'pane\x1fclose' "$scenario closed a pane"
+    assert_not_contains "$(cat "$log")" $'tab\x1fclose' "$scenario closed a tab"
+    assert_not_contains "$(cat "$log")" $'workspace\x1flist' "$scenario looked up a foreign same-label workspace"
+    assert_not_contains "$(cat "$log")" $'workspace\x1fclose' "$scenario closed a workspace"
+    pass "herdr presentation seed reuse: $scenario"
+  done
 }
 
-test_projection_create_never_closes_a_concurrent_same_label_tab() {
-  local dir log resp fb out status
-  dir="$TMP_ROOT/projection-concurrent-tab"; mkdir -p "$dir/responses"
-  log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '{"result":{"workspace":{"workspace_id":"w9"},"tab":{"tab_id":"w9:t1"},"root_pane":{"pane_id":"w9:p1"}}}\n' > "$resp/1.out"
-  printf '{"result":{"tab":{"tab_id":"w9:t2"},"root_pane":{"pane_id":"w9:p2"}}}\n' > "$resp/2.out"
-  printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"},{"tab_id":"w9:t3","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/3.out"
-  printf '{"result":{"panes":[{"pane_id":"w9:p1","tab_id":"w9:t1"},{"pane_id":"w9:p2","tab_id":"w9:t2"},{"pane_id":"w9:p3","tab_id":"w9:t3"}]}}\n' > "$resp/4.out"
-  printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/5.out"
-  printf '{"result":{"pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}}}\n' > "$resp/6.out"
-  printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"},{"tab_id":"w9:t3","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/7.out"
-  printf '{"error":{"code":"pane_not_found"}}\n' > "$resp/9.out"
-  printf '{"result":{"tabs":[{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"},{"tab_id":"w9:t3","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/10.out"
-  printf '{"result":{"panes":[{"pane_id":"w9:p2","tab_id":"w9:t2"},{"pane_id":"w9:p3","tab_id":"w9:t3"}]}}\n' > "$resp/11.out"
-  fb=$(make_herdr_fakebin "$dir")
-  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_focus_snapshot() { printf "captain-ws\tcaptain-tab"; }; fm_backend_herdr_projection_focus_restore() { return 0; }; fm_backend_herdr_projection_create_task /tmp/proj label fm-task-p2' "$ROOT" 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "a concurrent tab should prevent exact one-pane projection convergence"
-  assert_contains "$out" "did not converge to exactly one task pane" \
-    "projection did not report the concurrent shape"
-  assert_not_contains "$(cat "$log")" $'tab\x1fclose\x1fw9:t3' \
-    "projection closed a concurrent same-label tab"
-  assert_not_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p3' \
-    "projection closed a concurrent same-label pane"
-  pass "herdr presentation create: concurrent same-label tabs are never prune targets"
+test_projection_cleanup_identical_seed_task_ids_closes_once() {
+  local dir out
+  dir="$TMP_ROOT/projection-identical-cleanup"; mkdir -p "$dir"
+  out=$(EVENTS="$dir/events" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_close_pane_focus_preserving() { printf "%s:%s\n" "$1" "$2" >> "$EVENTS"; }
+    fm_backend_herdr_projection_cleanup_exact fmtest w9:p1 w9:p1 || exit 1
+    cat "$EVENTS"
+  ' "$ROOT") || fail "identical seed/task cleanup failed"
+  [ "$out" = fmtest:w9:p1 ] || fail "identical seed/task cleanup must close exactly once: $out"
+  pass "herdr presentation cleanup: identical seed/task pane IDs close once"
 }
 
 test_projection_focus_snapshot_requires_exact_workspace_and_tab() {
@@ -6627,7 +6633,7 @@ test_presentation_preference_reports_three_distinct_states
 test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
-test_projection_create_never_closes_a_concurrent_same_label_tab
+test_projection_cleanup_identical_seed_task_ids_closes_once
 test_projection_focus_snapshot_requires_exact_workspace_and_tab
 test_projection_close_restores_exact_prior_focus
 test_projection_close_refuses_active_tab

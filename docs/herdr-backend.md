@@ -272,9 +272,10 @@ It falls back to a unique home-label lookup only for a Firstmate outside Herdr.
 Projected children are never collapsed back into that parent.
 The parent is the placement and ordering reference the projection is bound under.
 
-The normal `fm-<id>` task tab is created in the exact new workspace returned by Herdr.
-Only the exact seeded default tab returned by the same workspace-create response can be pruned.
-Before and after create, prune, order, abort cleanup, and normal cleanup, Firstmate verifies exact workspace, tab, pane, and active-focus ids.
+The exact seed tab and root pane returned by the fresh workspace create become the normal `fm-<id>` task endpoint.
+Firstmate renames that tab instead of creating a second tab and pruning the seed, so automatic seed titles cannot prevent first launch.
+Before and after rename, it requires exactly one tab and one pane with matching workspace and tab membership and no registered agent; later task-title changes do not change endpoint identity.
+Before and after create, rename, order, abort cleanup, and normal cleanup, Firstmate verifies exact workspace, tab, pane, and active-focus ids.
 An ambiguous response grants no mutation or cleanup authority.
 
 ### Ordering
@@ -625,7 +626,8 @@ To repeat the check on a live session, turn the feature on, wait one watcher pol
 ## Default-tab prune safety
 
 `herdr workspace create` seeds one default tab.
-Firstmate prunes it only after a real task tab exists and only when the same create response supplied the seeded tab id.
+Fresh presentation workspaces reuse that seed as described under [Owning parent and tabs](#owning-parent-and-tabs).
+For ordinary flat containers, Firstmate prunes it only after a real task tab exists and only when the same create response supplied the seeded tab id.
 An adopted workspace never supplies that id and can never enter the prune path, regardless of labels or tab count.
 Immediately before close, Firstmate rechecks the exact tab, expected seed label, and native agent state.
 A working seed pane is never closed.
