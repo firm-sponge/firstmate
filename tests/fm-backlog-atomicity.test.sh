@@ -1595,9 +1595,84 @@ test_completion_closes_a_local_only_ship_before_reporting_success() {
   out=$(run_teardown "$case_dir" "$id") || fail "teardown failed: $out"
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
     || fail "teardown reported success with the item still $(row_state "$case_dir" "$id")"
-  assert_grep 'local main' "$(backlog_of "$case_dir")" \
-    "a local-only landing was closed without its local-main note"
+  assert_grep 'local landing branch' "$(backlog_of "$case_dir")" \
+    "a local-only landing was closed without its landing note"
   pass "completion closes a local-only ship, with its landing note, before reporting success"
+}
+
+test_completion_closes_a_registered_landing_branch() {
+  local case_dir id out
+  id=atomic-close-landing-branch
+  case_dir=$(make_home close-landing-branch)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  printf '%s\n' '- project [local-only land=dom/main] - landing fixture' \
+    > "$(home_of "$case_dir")/data/projects.md"
+  git -C "$case_dir/project" branch dom/main
+  fm_write_meta "$(home_of "$case_dir")/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$case_dir/absent-worktree" "project=$case_dir/project" \
+    'harness=claude' 'kind=ship' 'mode=local-only' 'yolo=off' \
+    'spawn_gen=spawn-landing-branch'
+
+  out=$(run_teardown "$case_dir" "$id") || fail "registered landing teardown failed: $out"
+  [ "$(row_state "$case_dir" "$id")" = "done" ] || fail "landing row was not closed"
+  assert_grep 'local landing branch' "$(backlog_of "$case_dir")" "landing note was lost"
+  assert_absent "$(home_of "$case_dir")/state/$id.meta" "closed task record survived"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" "close marker survived"
+  pass "completion closes a local-only task registered with land=dom/main"
+}
+
+test_close_note_roundtrip_and_unsafe_replay() {
+  local case_dir home id note encoded out rc n=0 FM_HOME
+  case_dir=$(make_home close-note-roundtrip)
+  home=$(home_of "$case_dir")
+  export FM_HOME="$home"
+  for note in 'local main' 'local landing branch' discarded; do
+    n=$((n + 1)); id="atomic-note-$n"
+    add_item "$case_dir" "$id"
+    start_item "$case_dir" "$id"
+    write_task_meta "$case_dir" "$id" ship local-only 'spawn_gen=note-roundtrip'
+    encoded=${note// /%20}
+    (
+      . "$ROOT/bin/fm-tasks-axi-lib.sh"
+      . "$ROOT/bin/fm-backlog-transition-lib.sh"
+      fm_backlog_close_marker_write "$home/state" "$id" "$home/data" note-roundtrip \
+        --note "$note" || exit 1
+      assert_grep "arg=$encoded" "$home/state/$id.backlog-close" "note encoding changed"
+      fm_backlog_close_marker_replay "$home/state" "$home/state/$id.backlog-close" "$home/data"
+    ) || fail "note roundtrip failed: $note"
+    [ "$(row_state "$case_dir" "$id")" = "done" ] || fail "note replay left row open"
+    assert_grep "$note" "$(backlog_of "$case_dir")" "decoded note was lost"
+    assert_absent "$home/state/$id.meta" "replayed task record survived"
+    assert_absent "$home/state/$id.backlog-close" "replayed close marker survived"
+  done
+  for encoded in 'arbitrary' 'local landing branch' 'local%20landing%20branch%ZZ' \
+      'local%20landing%20branch%0A' 'local%2520landing%2520branch' \
+      'local%20landing%20branch;touch%20pwned' 'local%20main%20extra' 'discarded%20'; do
+    n=$((n + 1)); id="atomic-note-$n"
+    add_item "$case_dir" "$id"
+    start_item "$case_dir" "$id"
+    write_task_meta "$case_dir" "$id" ship local-only 'spawn_gen=note-roundtrip'
+    printf 'id=%s\ndata=%s\nspawn_gen=note-roundtrip\ncleanup_incomplete=0\narg=--note\narg=%s\n' \
+      "$id" "$home/data" "$encoded" > "$home/state/$id.backlog-close"
+    cp "$home/state/$id.backlog-close" "$case_dir/marker-before"
+    cp "$home/state/$id.meta" "$case_dir/meta-before"
+    cp "$(backlog_of "$case_dir")" "$case_dir/backlog-before"
+    rc=0
+    out=$(
+      . "$ROOT/bin/fm-tasks-axi-lib.sh"
+      . "$ROOT/bin/fm-backlog-transition-lib.sh"
+      fm_backlog_close_marker_replay "$home/state" "$home/state/$id.backlog-close" "$home/data" \
+        || { printf '%s\n' "$FM_BACKLOG_TRANSITION_ERROR"; exit 1; }
+    ) || rc=$?
+    [ "$rc" -ne 0 ] || fail "unsafe note replay succeeded: $encoded"
+    assert_contains "$out" 'invalid pending-close arguments' "wrong refusal for unsafe note"
+    cmp -s "$case_dir/marker-before" "$home/state/$id.backlog-close" || fail "invalid marker changed"
+    cmp -s "$case_dir/meta-before" "$home/state/$id.meta" || fail "task record changed"
+    cmp -s "$case_dir/backlog-before" "$(backlog_of "$case_dir")" || fail "backlog changed"
+  done
+  pass "close notes roundtrip exactly and unsafe replay preserves all durable records"
 }
 
 test_completion_closes_a_scout_with_its_report() {
@@ -3151,6 +3226,8 @@ test_fm_tasks_axi_gnu_timeout_forces_termination_of_a_sigterm_ignoring_child
 test_dispatch_interruption_during_kimi_readiness_fails_before_commit
 test_dispatch_does_not_resurrect_a_row_closed_after_preflight
 test_dispatch_fails_when_its_row_vanishes_after_preflight
+test_completion_closes_a_registered_landing_branch
+test_close_note_roundtrip_and_unsafe_replay
 test_completion_closes_a_local_only_ship_before_reporting_success
 test_completion_closes_a_scout_with_its_report
 test_forced_scout_discard_records_no_report
