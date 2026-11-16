@@ -113,6 +113,27 @@ A single-process harness has no descendant that adds a distinct verdict, which i
 The portable regression pins every half without any harness installed: `tests/fm-harness-precedence.test.sh` asserts that this two-process topology decides at comm strength, that the descent probe reaches a strength the top-of-session probe cannot, that a sibling branch answering a foreign harness contributes no verdict, that a foreign args-only verdict at the deepest vantage leaves the comm-strength identity intact, and that equal-depth ties choose the comm-strength leaf regardless of process ordering.
 The run did not reach `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `muse`, which were not installed, and stopped at the same pre-existing liveness failure for `cursor` 3.18.9, whose resolved binary on that machine is the editor rather than `cursor-agent`; those adapters are unverified by this run.
 
+### Codex session-lock process boundary
+
+Verified on 2026-11-16 on Linux with `codex-cli 0.169.0`:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-codex-hook-layer-live-e2e.test.sh
+```
+
+The token-free guard starts a private `codex app-server --managed-daemon --listen off` with an isolated `HOME` and `CODEX_HOME`, then an independent `codex --no-daemon` CLI without a prompt.
+It checks the installed native processes through the session-lock library:
+
+```text
+# codex codex-cli 0.169.0: real managed server rejected as session owner
+ok - codex codex-cli 0.169.0: real managed server rejected; independent CLI session accepted (no prompts)
+```
+
+`bin/fm-session-lock-lib.sh` owns the server exclusion and ancestry boundary; `bin/fm-lock.sh` documents acquisition and recovery.
+A server-only ancestry cannot prove a per-thread owner and remains read-only; this guard does not claim working Firstmate startup inside a shared app-server thread.
+The portable `tests/fm-session-lock-ancestry.test.sh` drives real processes to cover reclaiming a live server's old lock, refusal to climb through the server into its launcher's session, preservation of an independent child session, and contention between independent CLI sessions.
+No macOS or Windows live Codex session-lock result is claimed by this Linux run.
+
 ## tmux
 
 Foreground-process behavior was verified on 2026-07-07 with tmux 3.6a on macOS.
