@@ -97,11 +97,11 @@ fm_ps_ppid() {  # <pid> -> parent pid
 }
 
 # True for Codex's multiplexing server, which is not a session process.
-# Match the executable and subcommand at the start of argv, never words in a
+# Match the executable and subcommand after known leading options, never words in a
 # CLI prompt (which may itself discuss `app-server --managed-daemon`).
 # Both managed daemons and standalone app servers can host multiple threads.
 fm_codex_server_process_matches() {  # <args>
-  local executable rest
+  local executable rest option
   read -r executable rest <<< "$1"
   case "${executable##*/}" in
     node|node.exe) read -r executable rest <<< "$rest" ;;
@@ -110,9 +110,20 @@ fm_codex_server_process_matches() {  # <args>
     codex|codex.exe|codex.js) ;;
     *) return 1 ;;
   esac
-  case "$rest" in
-    app-server|app-server\ *) return 0 ;;
-  esac
+  while [ -n "$rest" ]; do
+    read -r option rest <<< "$rest"
+    case "$option" in
+      app-server) return 0 ;;
+      -c|--config|--enable|--disable|-m|--model|-p|--profile|-s|--sandbox|\
+      -C|--cd|--add-dir|-a|--ask-for-approval|--remote|--remote-auth-token-env|--local-provider)
+        [ -n "$rest" ] || return 1
+        read -r option rest <<< "$rest"
+        ;;
+      --*=*|--strict-config|--oss|--approve-for-me|--dangerously-bypass-approvals-and-sandbox|\
+      --dangerously-bypass-hook-trust|--worktree|--search|--no-alt-screen|--no-daemon) ;;
+      *) return 1 ;;
+    esac
+  done
   return 1
 }
 
