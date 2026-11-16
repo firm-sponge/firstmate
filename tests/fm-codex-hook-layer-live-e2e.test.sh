@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Live guard for the codex crewmate launch's hook posture.
+# Live guard for the codex crewmate launch's hook posture and session identity.
 #
 # The verdict here comes from the installed codex, not from a stub: a stub can
 # only confirm the assumption already written into it, and what this guard
@@ -21,6 +21,8 @@
 # and preserve the wrapper's inherited PATH without loading operator config.
 # Neither layer spends model tokens, so the guard runs by default wherever
 # its tools are installed.
+# The session-lock cases also run without prompts: a private managed server
+# must not count as a session owner, while an independent --no-daemon CLI must.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -298,6 +300,104 @@ PY
   [ "$status" -eq 0 ] || fail "codex $CODEX_VERSION: installed Stop parser regression failed"
 }
 
+test_installed_codex_server_is_not_a_session_owner() {
+  python3 - "$ROOT" "$TMP_ROOT/session-identity" "$CODEX_VERSION" <<'PY'
+import os
+from pathlib import Path
+import pty
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+root, lab, version = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+lab.mkdir()
+env = {key: os.environ[key] for key in ['PATH', 'LANG', 'LC_ALL'] if key in os.environ}
+env.update({'HOME': str(lab), 'CODEX_HOME': str(lab / 'codex-home'),
+            'TERM': 'xterm', 'OTEL_SDK_DISABLED': 'true', 'CODEX_PANE_BYPASS': '1'})
+Path(env['CODEX_HOME']).mkdir()
+shell = shutil.which('bash')
+library = root / 'bin/fm-session-lock-lib.sh'
+
+def verdict(pid):
+    return subprocess.run([shell, '-c', '. "$1"; fm_harness_pid_alive "$2"',
+                           '_', str(library), str(pid)], env=env, capture_output=True).returncode
+
+def processes(pid):
+    # Only inspect the processes launched by this guard, never a saved endpoint.
+    table = subprocess.check_output(['ps', '-axo', 'pid=,ppid='], text=True)
+    parents = dict(tuple(map(int, line.split())) for line in table.splitlines())
+    owned = {pid}
+    while True:
+        expanded = owned | {child for child, parent in parents.items() if parent in owned}
+        if expanded == owned:
+            return owned
+        owned = expanded
+
+def stop(process):
+    if process.poll() is None:
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+
+try:
+    with (lab / 'server-stderr').open('w') as stderr:
+        server = subprocess.Popen(['codex', 'app-server', '--managed-daemon', '--listen', 'off'],
+            cwd=lab, env=env, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=stderr, start_new_session=True)
+        try:
+            deadline = time.monotonic() + 15
+            while True:
+                assert server.poll() is None, (lab / 'server-stderr').read_text()
+                names = {pid: subprocess.check_output(['ps', '-o', 'args=', '-p', str(pid)],
+                                                     text=True).strip()
+                         for pid in processes(server.pid)}
+                native = [pid for pid, args in names.items()
+                          if args.split()[0].endswith('/codex') and
+                          args.split()[1:3] == ['app-server', '--managed-daemon']]
+                if native:
+                    break
+                assert time.monotonic() < deadline, names
+                time.sleep(0.1)
+            assert all(verdict(pid) == 1 for pid in native), names
+            print(f'# codex {version}: real managed server rejected as session owner')
+        finally:
+            stop(server)
+
+    master, slave = pty.openpty()
+    cli = subprocess.Popen(['codex', '--no-daemon', '--disable', 'hooks', '--no-alt-screen'],
+        cwd=lab, env=env, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+    os.close(slave)
+    try:
+        deadline = time.monotonic() + 15
+        while True:
+            assert cli.poll() is None, 'independent CLI exited before its identity probe'
+            names = {pid: subprocess.check_output(['ps', '-o', 'args=', '-p', str(pid)],
+                                                 text=True).strip()
+                     for pid in processes(cli.pid)}
+            native = [pid for pid, args in names.items()
+                      if args.split()[0].endswith('/codex') and
+                      args.split()[1:2] == ['--no-daemon']]
+            if native and all(verdict(pid) == 0 for pid in native):
+                break
+            assert time.monotonic() < deadline, 'no independent CLI process matched'
+            time.sleep(0.1)
+        print(f'ok - codex {version}: real managed server rejected; independent CLI session accepted (no prompts)')
+    finally:
+        stop(cli)
+        os.close(master)
+except Exception as error:
+    raise SystemExit(f'not ok - codex {version}: session-lock process drift: {error!r}') from error
+PY
+  local status=$?
+  [ "$status" -eq 0 ] || fail "codex $CODEX_VERSION: installed session identity regression failed"
+}
+
+test_installed_codex_server_is_not_a_session_owner
 test_installed_codex_still_reports_the_hook_feature
 test_installed_codex_accepts_requested_hook_disablement_for_the_captured_crewmate_launch
 test_installed_codex_accepts_the_stop_wrapper_and_rejects_invalid_output

@@ -1657,6 +1657,103 @@ test_reanchor_keeps_autoarm_midturn_healthy() {
   pass "session-lock: a re-anchor during a rewake turn keeps the mid-turn auto-arm proof healthy"
 }
 
+test_codex_servers_are_not_session_owners() {
+  local dir daemon_pid session_pid real_bash comm args output rc
+  dir="$TMP_ROOT/codex-server"
+  real_bash=$(command -v bash)
+  mkdir -p "$dir/state"
+  ln -s "$real_bash" "$dir/codex"
+  # An actual process with Codex's server argv, parented by a different harness.
+  # On Linux comm is bash and only argv identifies it; on macOS comm can carry
+  # argv[0]. Neither source should turn a multiplexing server into a session.
+  cat > "$dir/app-server" <<'SH'
+printf '%s\n' "$$" > "$FM_HOME/state/server-pid"
+printf '%s\n' "$$" > "$FM_HOME/state/.lock"
+"$FM_LOCK" status > "$FM_HOME/state/server-status"
+"$FM_LOCK" > "$FM_HOME/state/server-acquire" 2>&1
+printf '%s\n' "$?" > "$FM_HOME/state/server-rc"
+mkdir -p "$FM_HOME/child"
+FM_HOME="$FM_HOME/child" "$FM_FIXTURE_CLAUDE" -c '"$FM_LOCK"; rc=$?; exit "$rc"' > "$FM_HOME/state/child-acquire" 2>&1
+printf '%s\n' "$?" > "$FM_HOME/state/child-rc"
+while [ ! -e "$FM_HOME/state/stop-server" ] && [ "$SECONDS" -lt 120 ]; do sleep 0.1; done
+SH
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID FM_HOME="$dir" \
+    FM_LOCK="$ROOT/bin/fm-lock.sh" FM_REAL_BASH="$real_bash" FM_FIXTURE_CLAUDE="$NAMED_CLAUDE" \
+    "$NAMED_CLAUDE" -c '( cd "$FM_HOME" && exec -a codex "$FM_REAL_BASH" app-server --managed-daemon ); rc=$?; exit "$rc"' &
+  BG_FIXTURE_PIDS+=("$!")
+  wait_for_file "$dir/state/server-rc" "the Codex server lock probe"
+  daemon_pid=$(cat "$dir/state/server-pid")
+  BG_FIXTURE_PIDS+=("$daemon_pid")
+  fm_ps_parent=$(ps -o ppid= -p "$daemon_pid" | tr -d ' ')
+  case "$(ps -o args= -p "$fm_ps_parent")" in
+    *"$NAMED_CLAUDE -c "*) ;;
+    *) fail "server fixture has no harness-shaped launcher, so the ancestry boundary is untested" ;;
+  esac
+  comm=$(ps -o comm= -p "$daemon_pid")
+  args=$(ps -o args= -p "$daemon_pid")
+  case "$args" in
+    'codex app-server --managed-daemon') ;;
+    *) fail "fixture did not expose server argv: comm=$comm args=$args" ;;
+  esac
+  printf '# Codex server fixture: comm=%s; args=%s\n' "$comm" "$args"
+  grep -q 'lock: stale' "$dir/state/server-status" || fail "a shared server still holds the lock"
+  [ "$(cat "$dir/state/server-rc")" = 1 ] || fail "a server-only ancestry acquired the lock"
+  grep -q 'cannot locate harness process' "$dir/state/server-acquire" \
+    || fail "server-only refusal did not explain the missing session process"
+  [ "$(cat "$dir/state/.lock")" = "$daemon_pid" ] || fail "refused acquisition mutated the old lock"
+  wait_for_file "$dir/state/child-rc" "an independent Claude child of the server"
+  [ "$(cat "$dir/state/child-rc")" = 0 ] \
+    || fail "server boundary hid an independent child session: $(cat "$dir/state/child-acquire")"
+  [ "$(cat "$dir/child/state/.lock")" != "$daemon_pid" ] || fail "child lock anchored on its server parent"
+
+  # Smallest counterfactual: keep the same live server and home, acquire from
+  # an independent CLI-shaped process, then try a second CLI while it is alive.
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID FM_HOME="$dir" \
+    FM_LOCK="$ROOT/bin/fm-lock.sh" "$dir/codex" -c '
+      "$FM_LOCK" > "$FM_HOME/state/cli-acquire" 2>&1
+      printf "%s\n" "$?" > "$FM_HOME/state/cli-rc"
+      printf "%s\n" "$$" > "$FM_HOME/state/cli-pid"
+      while [ ! -e "$FM_HOME/state/stop-cli" ] && [ "$SECONDS" -lt 120 ]; do sleep 0.1; done
+    ' &
+  BG_FIXTURE_PIDS+=("$!")
+  wait_for_file "$dir/state/cli-pid" "the independent Codex CLI"
+  session_pid=$(cat "$dir/state/cli-pid")
+  [ "$(cat "$dir/state/cli-rc")" = 0 ] || fail "the independent CLI could not reclaim a server-held lock"
+  [ "$(cat "$dir/state/.lock")" = "$session_pid" ] || fail "the lock did not anchor on the independent CLI"
+  kill -0 "$daemon_pid" || fail "the server exited, making reclaim vacuous"
+  output=$(env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID FM_HOME="$dir" \
+    FM_LOCK="$ROOT/bin/fm-lock.sh" "$dir/codex" -c '"$FM_LOCK"; rc=$?; exit "$rc"' 2>&1)
+  rc=$?
+  [ "$rc" = 1 ] || fail "a competing CLI acquired a live session's lock: $output"
+  case "$output" in
+    *'another live firstmate session holds the lock'*) ;;
+    *) fail "the competing CLI failed for an unrelated reason: $output" ;;
+  esac
+  [ "$(cat "$dir/state/.lock")" = "$session_pid" ] || fail "contention replaced the real session owner"
+  : > "$dir/state/stop-cli"
+  : > "$dir/state/stop-server"
+  pass "session-lock: live Codex servers are reclaimable, server ancestry stops, and independent CLI contention is preserved"
+}
+
+test_codex_server_identity_is_not_prompt_text() {
+  local comm args
+  for comm in codex /opt/codex bash node; do
+    for args in 'codex app-server --managed-daemon' '/opt/codex app-server --stdio' \
+      'node /opt/codex.js app-server --managed-daemon'; do
+      if lib_eval "$FAKEBIN" "fm_harness_process_matches '$comm' '$args'"; then
+        fail "server identity was accepted as a session: $comm / $args"
+      fi
+    done
+  done
+  lib_eval "$FAKEBIN" "fm_harness_process_matches codex 'codex explain app-server --managed-daemon'" \
+    || fail "a prompt discussing the daemon hid a real CLI session"
+  lib_eval "$FAKEBIN" "fm_harness_process_matches claude 'claude app-server --managed-daemon'" \
+    || fail "Codex exclusion changed another harness's identity"
+  pass "session-lock: server identity survives differing comm signals and excludes CLI prompt text"
+}
+
+test_codex_servers_are_not_session_owners
+test_codex_server_identity_is_not_prompt_text
 test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
 test_bun_run_omp_is_identified_on_both_platforms

@@ -96,8 +96,28 @@ fm_ps_ppid() {  # <pid> -> parent pid
   printf '%s' "$out"
 }
 
+# True for Codex's multiplexing server, which is not a session process.
+# Match the executable and subcommand at the start of argv, never words in a
+# CLI prompt (which may itself discuss `app-server --managed-daemon`).
+# Both managed daemons and standalone app servers can host multiple threads.
+fm_codex_server_process_matches() {  # <args>
+  local executable rest
+  read -r executable rest <<< "$1"
+  case "${executable##*/}" in
+    node|node.exe) read -r executable rest <<< "$rest" ;;
+  esac
+  case "${executable##*/}" in
+    codex|codex.exe|codex.js) ;;
+    *) return 1 ;;
+  esac
+  case "$rest" in
+    app-server|app-server\ *) return 0 ;;
+  esac
+  return 1
+}
+
 # True when the process described by command name $1 and full argument string $2
-# is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
+# is a verified session harness. Sets the two ancestry-walk flags below.
 #
 # Evidence, in order:
 #   1. the basename of the reported command name, against FM_HARNESS_RE.
@@ -111,9 +131,15 @@ fm_ps_ppid() {  # <pid> -> parent pid
 #   5. omp's structural identity, owned by bin/fm-omp-process-lib.sh, which
 #      also covers the bun-package install whose process name is `bun`.
 FM_HARNESS_IS_CLAUDE=0
+FM_HARNESS_IS_CODEX_SERVER=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
+  FM_HARNESS_IS_CODEX_SERVER=0
+  if fm_codex_server_process_matches "$args"; then
+    FM_HARNESS_IS_CODEX_SERVER=1
+    return 1
+  fi
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
@@ -589,6 +615,11 @@ fm_harness_ancestry_pids() {
       printed=1
       [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
       extending=1
+    elif [ "$FM_HARNESS_IS_CODEX_SERVER" -eq 1 ]; then
+      # A server's parent is its launcher, not the owner of the calling thread.
+      # Do not climb through it into another session, even before any match.
+      [ "$printed" -eq 1 ] && return 0
+      return 1
     elif [ "$extending" -eq 1 ]; then
       break
     fi
