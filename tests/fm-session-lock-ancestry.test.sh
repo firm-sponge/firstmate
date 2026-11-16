@@ -1739,11 +1739,21 @@ test_codex_server_identity_is_not_prompt_text() {
   local comm args
   for comm in codex /opt/codex bash node; do
     for args in 'codex app-server --managed-daemon' '/opt/codex app-server --stdio' \
-      'node /opt/codex.js app-server --managed-daemon'; do
+      'node /opt/codex.js app-server --managed-daemon' \
+      'codex -c features.code_mode_host=true app-server --listen unix://' \
+      'codex --strict-config --config features.code_mode_host=true app-server --listen unix://' \
+      'node /opt/codex.js --enable code_mode_host --disable other --config=x=y app-server'; do
       if lib_eval "$FAKEBIN" "fm_harness_process_matches '$comm' '$args'"; then
         fail "server identity was accepted as a session: $comm / $args"
       fi
     done
+  done
+  for args in 'codex -c app-server' 'codex --config app-server --listen unix://' \
+    'codex --model app-server' 'codex --config=app-server explain app-server' \
+    'codex -c x=app-server explain app-server --managed-daemon' \
+    'codex --unknown app-server' 'codex -- app-server' 'codex -c'; do
+    lib_eval "$FAKEBIN" "fm_harness_process_matches codex '$args' && [ \"\$FM_HARNESS_IS_CODEX_SERVER\" = 0 ]" \
+      || fail "option or prompt text hid a real CLI session: $args"
   done
   lib_eval "$FAKEBIN" "fm_harness_process_matches codex 'codex explain app-server --managed-daemon'" \
     || fail "a prompt discussing the daemon hid a real CLI session"
